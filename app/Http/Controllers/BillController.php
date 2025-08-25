@@ -1034,6 +1034,7 @@ class BillController extends Controller
 
         // Respect edit context: if skip_arrears is set, use provided current_arrears instead of recalculating
         if ($request->boolean('skip_arrears')) {
+
             $arrears = round((float)$request->input('current_arrears', 0), 2);
             $previousDetails = []; // none when skipping
         } else {
@@ -1044,29 +1045,41 @@ class BillController extends Controller
                 ->orderBy('id', 'desc')
                 ->get();
 
+          
             $arrears = 0.0;
             $previousDetails = [];
             $allotee = Allotee::find($alloteeId);
-            foreach ($previousBills as $pb) {
-                 // Gather arrears for this allotee: field + previous pending bills
+            if(count($previousBills) > 0){
+                foreach ($previousBills as $pb) {
+                    // Gather arrears for this allotee: field + previous pending bills
+                    $arrearsFromProfile = (float)($allotee->arrears ?? 0);
+                    $arrearsFromBills = (float)Bill::where('allotee_id', $allotee->id)
+                        ->where('due_amount', '>', 0)
+                        ->where('is_active', 1)
+                        ->sum('due_amount');
+                    $arrears = round($arrearsFromProfile + $arrearsFromBills, 2);
+
+                    if ($arrears > 0) {
+                        $previousDetails[] = [
+                            'bill_id' => $pb->id,
+                            'bill_number' => $pb->bill_number,
+                            'year' => $pb->year,
+                            'duration' => trim(($pb->fromMonth->name ?? '') . ' - ' . ($pb->toMonth->name ?? '')),
+                            'is_paid' => (int)$pb->is_paid,
+                            'due_amount' => round($arrears, 2),
+                        ];
+                    }
+                }
+            } else{
+                // Gather arrears for this allotee: field + previous pending bills
                 $arrearsFromProfile = (float)($allotee->arrears ?? 0);
                 $arrearsFromBills = (float)Bill::where('allotee_id', $allotee->id)
                     ->where('due_amount', '>', 0)
                     ->where('is_active', 1)
                     ->sum('due_amount');
                 $arrears = round($arrearsFromProfile + $arrearsFromBills, 2);
-
-                if ($arrears > 0) {
-                    $previousDetails[] = [
-                        'bill_id' => $pb->id,
-                        'bill_number' => $pb->bill_number,
-                        'year' => $pb->year,
-                        'duration' => trim(($pb->fromMonth->name ?? '') . ' - ' . ($pb->toMonth->name ?? '')),
-                        'is_paid' => (int)$pb->is_paid,
-                        'due_amount' => round($arrears, 2),
-                    ];
-                }
             }
+
             $arrears = round($arrears, 2);
         }
 

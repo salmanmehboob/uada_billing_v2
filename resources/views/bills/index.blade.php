@@ -98,7 +98,7 @@
                         </select>
                     </div>
                     <div class="col-md-3 text-center">
-                        <button id="btn-apply" class="btn btn-primary me-2" type="button">Apply</button>
+                        <button id="btn-apply" class="btn btn-primary me-2" type="button">Filter</button>
                         <button id="btn-reset" class="btn btn-dark" type="button">Reset</button>
                     </div>
                 </div>
@@ -344,18 +344,46 @@
             });
             
 
-            // Payment modal via SweetAlert with auto-populated amount (due first, else total)
-            window.openPayModal = function (billId, billNo, dueStr, totalStr) {
+            // Payment modal via SweetAlert with auto-populated amount (based on due date)
+            window.openPayModal = function (billId, billNo, dueDateStr, subTotalStr, totalStr) {
                 const parseAmount = (s) => {
                     if (s === undefined || s === null) return NaN;
                     const num = parseFloat(String(s).toString().replace(/,/g, ''));
                     return isNaN(num) ? NaN : num;
                 };
-                const due = parseAmount(dueStr);
-                const total = parseAmount(totalStr);
-                const defaultAmount = !isNaN(due) && due > 0 ? due : (!isNaN(total) ? total : 0);
 
-                const today = new Date().toISOString().slice(0, 10);
+                const toDateOnly = (s) => {
+                    if (!s) return null;
+                    // Expecting yyyy-mm-dd; fallback to Date parsing
+                    const d = new Date(s);
+                    if (isNaN(d.getTime())) return null;
+                    // Normalize to local midnight for comparison
+                    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+                };
+
+                const today = new Date();
+                const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+                const dueDate = toDateOnly(dueDateStr);
+                const isPastDue = dueDate ? (todayOnly > dueDate) : false;
+
+                const subTotal = parseAmount(subTotalStr);
+                const total = parseAmount(totalStr);
+
+                // Rule:
+                // - If due date is passed -> use Total
+                // - Else -> use Sub Total (without sub charges)
+                let defaultAmount = 0;
+                if (isPastDue && !isNaN(total)) {
+                    defaultAmount = total;
+                } else if (!isNaN(subTotal)) {
+                    defaultAmount = subTotal;
+                } else if (!isNaN(total)) {
+                    // Fallback if subTotal missing
+                    defaultAmount = total;
+                }
+
+                const todayIso = new Date().toISOString().slice(0, 10);
                 Swal.fire({
                     title: `Record Payment — ${billNo}`,
                     html: `
@@ -365,7 +393,7 @@
                 </div>
                 <div class="text-start">
                     <label class="form-label">Payment Date</label>
-                    <input id="swal-date" type="date" class="form-control" value="${today}">
+                    <input id="swal-date" type="date" class="form-control" value="${todayIso}">
                 </div>
             `,
                     focusConfirm: false,
@@ -492,15 +520,16 @@
                         if (!actionsCell) return;
                         const billId = row.id || row.DT_RowId || null;
                         if (!billId) return;
-                        actionsCell.dataset.enhanced = '1';
 
+                        // Clean previously injected buttons to avoid duplicates on redraw
+                        actionsCell.querySelectorAll('.btn-pay, .btn-history').forEach(el => el.remove());
 
-                        // Always clear or ensure actionsCell is available before appending
-                        // const actionsCell = ...; const billId = row.id;
+                        function toActive(v) {
+                            return v === 1 || v === '1' || v === true;
+                        }
                         function toBool(v) {
                             return v === true || v === 1 || v === '1';
                         }
-
                         function toNum(v) {
                             if (v === null || v === undefined) return 0;
                             const s = String(v).replace(/,/g, '');
@@ -508,11 +537,11 @@
                             return isNaN(n) ? 0 : n;
                         }
 
-                        const isActive = toBool(row?.is_active_raw ?? row?.is_active);
+                        const isActive = toActive(row?.is_active_raw ?? row?.is_active);
                         const isPaid = toBool(row?.is_paid);
                         const due = toNum(row?.due_amount_raw ?? row?.due_amount);
 
-// 1) History link shown only when bill is paid
+                        // 1) History link shown only when bill is paid
                         if (isPaid) {
                             const aHist = document.createElement('a');
                             aHist.href = 'javascript:void(0)';
@@ -523,7 +552,7 @@
                             actionsCell.appendChild(aHist);
                         }
 
-// 2) Pay link shown only when bill is active and due_amount > 0
+                        // 2) Pay link shown only when bill is active (is_active == 1) and due_amount > 0
                         if (isActive && due > 0) {
                             const aPay = document.createElement('a');
                             aPay.href = 'javascript:void(0)';
@@ -533,7 +562,9 @@
                             aPay.addEventListener('click', () => openPayModal(
                                 billId,
                                 row.bill_number,
-                                due,
+                                // Keep passing amounts/dates as your modal expects
+                                row?.due_date,
+                                toNum(row?.sub_total),
                                 toNum(row?.total)
                             ));
                             actionsCell.appendChild(aPay);

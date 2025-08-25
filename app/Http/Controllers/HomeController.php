@@ -72,12 +72,34 @@ class HomeController extends Controller
             $cursor->addMonth();
         }
 
-        // Bills by Sector (Bar)
-        $billsBySector = Bill::select('sectors.name AS sector', DB::raw('COUNT(bills.id) AS total'))
+        // Bills by Sector (Bar) — two bars: Total Dues and Total Paid
+        $duesPerSector = Bill::select('sectors.name AS sector', DB::raw('SUM(bills.due_amount) AS due_total'))
             ->join('sectors', 'sectors.id', '=', 'bills.sector_id')
             ->groupBy('sectors.name')
-            ->orderByDesc('total')
-            ->get();
+            ->get()
+            ->keyBy('sector');
+
+        $paidPerSector = BillTransaction::select('sectors.name AS sector', DB::raw('SUM(bill_transactions.paid_amount) AS paid_total'))
+            ->join('bills', 'bills.id', '=', 'bill_transactions.bill_id')
+            ->join('sectors', 'sectors.id', '=', 'bills.sector_id')
+            ->groupBy('sectors.name')
+            ->get()
+            ->keyBy('sector');
+
+        // Union of sector labels from both queries
+        $sectorLabels = collect($duesPerSector->keys())
+            ->merge($paidPerSector->keys())
+            ->unique()
+            ->values()
+            ->toArray();
+
+        $sectorDuesValues = collect($sectorLabels)->map(function ($label) use ($duesPerSector) {
+            return (int) ($duesPerSector[$label]->due_total ?? 0);
+        })->toArray();
+
+        $sectorPaidValues = collect($sectorLabels)->map(function ($label) use ($paidPerSector) {
+            return (int) ($paidPerSector[$label]->paid_total ?? 0);
+        })->toArray();
 
         // Outstanding by Size (Pie)
         $duesBySize = Bill::select('sizes.name AS size', DB::raw('SUM(bills.due_amount) AS due_total'))
@@ -87,15 +109,56 @@ class HomeController extends Controller
             ->orderByDesc('due_total')
             ->get();
 
+        // Top 10 allotees by outstanding dues (for pie + details)
+        $topAlloteeDues = Bill::select([
+                'allotees.id',
+                'allotees.name',
+                'allotees.plot_no',
+                DB::raw('COALESCE(sectors.name, "") AS sector_name'),
+                DB::raw('COALESCE(sizes.name, "") AS size_name'),
+                DB::raw('SUM(bills.due_amount) AS due_total'),
+            ])
+            ->join('allotees', 'allotees.id', '=', 'bills.allotee_id')
+            ->leftJoin('sectors', 'sectors.id', '=', 'allotees.sector_id')
+            ->leftJoin('sizes', 'sizes.id', '=', 'allotees.size_id')
+            ->where('bills.due_amount', '>', 0)
+            ->groupBy('allotees.id', 'allotees.name', 'allotees.plot_no', 'sectors.name', 'sizes.name')
+            ->orderByDesc('due_total')
+            ->limit(10)
+            ->get();
+
+        $alloteeLabels = $topAlloteeDues->map(function ($r) {
+            $parts = array_filter([
+                (string)($r->name ?? ''),
+                (string)($r->plot_no ?? ''),
+                (string)($r->sector_name ?? ''),
+                (string)($r->size_name ?? ''),
+            ]);
+            return trim(implode(' ', $parts));
+        })->toArray();
+
+        $alloteeValues = $topAlloteeDues->pluck('due_total')->map(fn($v) => (int)$v)->toArray();
+
         // Top overdue bills (table)
         $topOverdue = Bill::select([
             'bills.id',
             'bills.bill_number',
+            'bills.bill_total',
+            'bills.sub_total',
+            'bills.sub_charges',
+            'bills.total',
             'bills.due_amount',
             'bills.due_date',
+            'allotees.name as allotee_name',
+            'allotees.plot_no as allotee_plot_no',
+            DB::raw('COALESCE(sectors.name, "") AS sector_name'),
+            DB::raw('COALESCE(sizes.name, "") AS size_name'),
             DB::raw("DATEDIFF(?, bills.due_date) AS days_overdue"),
         ])
             ->addBinding($today, 'select')
+            ->join('allotees', 'allotees.id', '=', 'bills.allotee_id')
+            ->leftJoin('sectors', 'sectors.id', '=', 'allotees.sector_id')
+            ->leftJoin('sizes', 'sizes.id', '=', 'allotees.size_id')
             ->where('bills.due_amount', '>', 0)
             ->whereDate('bills.due_date', '<', $today)
             ->orderByDesc(DB::raw("DATEDIFF('$today', bills.due_date)"))
@@ -123,12 +186,18 @@ class HomeController extends Controller
                 'values' => $monthValues,
             ],
             'billsBySector' => [
-                'labels' => $billsBySector->pluck('sector')->toArray(),
-                'values' => $billsBySector->pluck('total')->map(fn($v) => (int) $v)->toArray(),
+                'labels' => $sectorLabels,
+                'dues' => $sectorDuesValues,
+                'paid' => $sectorPaidValues,
             ],
             'duesBySize' => [
                 'labels' => $duesBySize->pluck('size')->toArray(),
                 'values' => $duesBySize->pluck('due_total')->map(fn($v) => (int) $v)->toArray(),
+            ],
+            'alloteeTopDues' => [
+                'labels' => $alloteeLabels,
+                'values' => $alloteeValues,
+                'items' => $topAlloteeDues, // for details table
             ],
             'topOverdue' => $topOverdue,
         ]);
